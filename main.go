@@ -13,7 +13,7 @@ type JsonResponse struct {
 }
 
 func main() {
-	// 为/api/get路由定义处理函数,返回字符相应
+	// 为/api/get路由定义处理函数,返回字符响应
 	http.HandleFunc("/api/get", func(w http.ResponseWriter, r *http.Request) {
 		// 写入应答
 		io.WriteString(w, "yes")
