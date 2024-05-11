@@ -38,8 +38,8 @@ func main() {
 	http.Handle("/", http.FileServer(staticDir))
 
 	// 设置监听端口
-	addr := ":8080"
-	log.Printf("服务端正在监听 %s", addr)
+	addr := ":8088"
+	log.Printf("服务端正在监听端口 %s，请在同目录下的public/目录里修改静态资源哦!", addr)
 
 	// 开始监听并提供服务
 	if err := http.ListenAndServe(addr, nil); err != nil {
