@@ -16,6 +16,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App struct
@@ -266,6 +267,18 @@ func (a *App) ClearLogs() {
 	a.logs = []string{}
 }
 
+// SelectDirectory 选择目录
+func (a *App) SelectDirectory() string {
+	// 使用 Wails 的目录选择对话框
+	dialog, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择静态文件目录",
+	})
+	if err != nil {
+		return ""
+	}
+	return dialog
+}
+
 // addLog 添加日志
 func (a *App) addLog(message string) {
 	a.logMu.Lock()
@@ -316,6 +329,10 @@ func main() {
 				} else if r.URL.Path == "/api/clearLogs" && r.Method == "POST" {
 					app.ClearLogs()
 					w.WriteHeader(http.StatusOK)
+				} else if r.URL.Path == "/api/selectDirectory" {
+					result := app.SelectDirectory()
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(result)
 				} else {
 					http.NotFound(w, r)
 				}
@@ -563,6 +580,13 @@ func getHTML() string {
                                 resolve(result);
                             });
                         });
+                    },
+                    SelectDirectory: function() {
+                        return new Promise((resolve, reject) => {
+                            window.runtime.Call('SelectDirectory', [], function(result) {
+                                resolve(result);
+                            });
+                        });
                     }
                 };
             } else {
@@ -591,6 +615,10 @@ func getHTML() string {
                     },
                     ClearLogs: async function() {
                         await fetch('/api/clearLogs', {method: 'POST'});
+                    },
+                    SelectDirectory: async function() {
+                        // 降级方案：返回空字符串，前端会使用prompt()
+                        return '';
                     }
                 };
             }
@@ -636,10 +664,27 @@ func getHTML() string {
             }
         }
 
-        function browseDirectory() {
-            const dir = prompt('请输入静态文件目录路径:', document.getElementById('dir').value);
-            if (dir) {
-                document.getElementById('dir').value = dir;
+        async function browseDirectory() {
+            try {
+                if (wailsApp && wailsApp.SelectDirectory) {
+                    const selectedDir = await wailsApp.SelectDirectory();
+                    if (selectedDir) {
+                        document.getElementById('dir').value = selectedDir;
+                        return;
+                    }
+                }
+                // 降级方案：使用输入框
+                const dir = prompt('请输入静态文件目录路径:', document.getElementById('dir').value);
+                if (dir) {
+                    document.getElementById('dir').value = dir;
+                }
+            } catch (e) {
+                console.error('选择目录失败:', e);
+                // 出错时使用降级方案
+                const dir = prompt('请输入静态文件目录路径:', document.getElementById('dir').value);
+                if (dir) {
+                    document.getElementById('dir').value = dir;
+                }
             }
         }
 
