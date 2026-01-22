@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/skip2/go-qrcode"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -344,6 +345,31 @@ func main() {
 					result := app.SelectDirectory()
 					w.Header().Set("Content-Type", "application/json")
 					json.NewEncoder(w).Encode(result)
+				} else if r.URL.Path == "/api/qrcode" {
+					// 生成二维码
+					data := r.URL.Query().Get("data")
+					if data == "" {
+						http.Error(w, "Missing data parameter", http.StatusBadRequest)
+						return
+					}
+					// 设置响应头为图片
+					w.Header().Set("Content-Type", "image/png")
+					// 使用 go-qrcode 库生成二维码并直接写入响应
+					err := qrcode.WriteFile(data, qrcode.Medium, 200, "./temp_qr.png")
+					if err != nil {
+						http.Error(w, "Failed to generate QR code", http.StatusInternalServerError)
+						return
+					}
+					// 读取生成的二维码图片并发送
+					imgData, err := os.ReadFile("./temp_qr.png")
+					if err != nil {
+						http.Error(w, "Failed to read QR code image", http.StatusInternalServerError)
+						return
+					}
+					// 发送图片数据
+					w.Write(imgData)
+					// 删除临时文件
+					os.Remove("./temp_qr.png")
 				} else {
 					http.NotFound(w, r)
 				}
@@ -820,9 +846,9 @@ func getHTML() string {
             container.innerHTML = '';
             urlElement.textContent = url;
             
-            // 使用在线API生成二维码图片
+            // 使用本地API生成二维码图片
             var img = document.createElement('img');
-            img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(url);
+            img.src = '/api/qrcode?data=' + encodeURIComponent(url);
             img.alt = 'QR Code';
             img.style.width = '200px';
             img.style.height = '200px';
