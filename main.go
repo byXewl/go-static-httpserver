@@ -39,10 +39,16 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
+// IPInfo IP地址信息
+type IPInfo struct {
+	IP   string `json:"ip"`
+	Name string `json:"name"`
+}
+
 // GetLocalIPs 获取本机所有IP地址
-func (a *App) GetLocalIPs() []string {
-	var ips []string
-	ips = append(ips, "127.0.0.1", "0.0.0.0")
+func (a *App) GetLocalIPs() []IPInfo {
+	var ips []IPInfo
+	ips = append(ips, IPInfo{IP: "127.0.0.1", Name: "本地"}, IPInfo{IP: "0.0.0.0", Name: "所有网卡"})
 
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -72,13 +78,19 @@ func (a *App) GetLocalIPs() []string {
 				ipStr := ip.String()
 				found := false
 				for _, existingIP := range ips {
-					if existingIP == ipStr {
+					if existingIP.IP == ipStr {
 						found = true
 						break
 					}
 				}
 				if !found {
-					ips = append(ips, ipStr)
+					// 提取网卡名称作为来源标识
+					name := iface.Name
+					// 尝试简化网卡名称，使其更友好
+					if len(name) > 10 {
+						name = name[:10] + "..."
+					}
+					ips = append(ips, IPInfo{IP: ipStr, Name: name})
 				}
 			}
 		}
@@ -530,6 +542,16 @@ func getHTML() string {
 
         <div id="message" class="message"></div>
 
+        <!-- 二维码显示模态框 -->
+        <div id="qrcodeModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center;">
+            <div style="background: white; padding: 20px; border-radius: 8px; text-align: center;">
+                <h3>访问二维码</h3>
+                <div id="qrcodeContainer" style="margin: 20px 0;"></div>
+                <p id="qrcodeUrl"></p>
+                <button onclick="closeQRCodeModal()" style="padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">关闭</button>
+            </div>
+        </div>
+
         <div class="form-group">
             <label>运行日志:</label>
             <div class="log-area" id="logArea"></div>
@@ -538,7 +560,7 @@ func getHTML() string {
 
     <script>
         // Wails 绑定桥接
-        let wailsApp = null;
+        var wailsApp = null;
         
         // 等待 Wails 运行时加载
         function initWails() {
@@ -549,42 +571,42 @@ func getHTML() string {
                 // 使用 Wails 运行时 API（新版）
                 wailsApp = {
                     GetLocalIPs: function() {
-                        return new Promise((resolve, reject) => {
+                        return new Promise(function(resolve, reject) {
                             window.runtime.Call('GetLocalIPs', [], function(result) {
                                 resolve(result);
                             });
                         });
                     },
                     StartServer: function(dir, ip, port) {
-                        return new Promise((resolve, reject) => {
+                        return new Promise(function(resolve, reject) {
                             window.runtime.Call('StartServer', [dir, ip, port], function(result) {
                                 resolve(result);
                             });
                         });
                     },
                     StopServer: function() {
-                        return new Promise((resolve, reject) => {
+                        return new Promise(function(resolve, reject) {
                             window.runtime.Call('StopServer', [], function(result) {
                                 resolve(result);
                             });
                         });
                     },
                     GetLogs: function() {
-                        return new Promise((resolve, reject) => {
+                        return new Promise(function(resolve, reject) {
                             window.runtime.Call('GetLogs', [], function(result) {
                                 resolve(result);
                             });
                         });
                     },
                     ClearLogs: function() {
-                        return new Promise((resolve, reject) => {
+                        return new Promise(function(resolve, reject) {
                             window.runtime.Call('ClearLogs', [], function(result) {
                                 resolve(result);
                             });
                         });
                     },
                     SelectDirectory: function() {
-                        return new Promise((resolve, reject) => {
+                        return new Promise(function(resolve, reject) {
                             window.runtime.Call('SelectDirectory', [], function(result) {
                                 resolve(result);
                             });
@@ -596,23 +618,23 @@ func getHTML() string {
                 console.warn('Wails 绑定不可用，使用 HTTP API');
                 wailsApp = {
                     GetLocalIPs: async function() {
-                        const response = await fetch('/api/getLocalIPs');
+                        var response = await fetch('/api/getLocalIPs');
                         return await response.json();
                     },
                     StartServer: async function(dir, ip, port) {
-                        const response = await fetch('/api/startServer', {
+                        var response = await fetch('/api/startServer', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({dir, ip, port})
+                            body: JSON.stringify({dir: dir, ip: ip, port: port})
                         });
                         return await response.json();
                     },
                     StopServer: async function() {
-                        const response = await fetch('/api/stopServer', {method: 'POST'});
+                        var response = await fetch('/api/stopServer', {method: 'POST'});
                         return await response.json();
                     },
                     GetLogs: async function() {
-                        const response = await fetch('/api/getLogs');
+                        var response = await fetch('/api/getLogs');
                         return await response.json();
                     },
                     ClearLogs: async function() {
@@ -626,26 +648,27 @@ func getHTML() string {
             }
         }
 
-        let ips = [];
+        var ips = [];
         
         // 页面加载时初始化
         window.onload = async function() {
             initWails();
             
             // 等待一下确保绑定就绪
-            await new Promise(resolve => setTimeout(resolve, 100));
+            await new Promise(function(resolve) { setTimeout(resolve, 100); });
             
             try {
                 if (wailsApp && wailsApp.GetLocalIPs) {
                     ips = await wailsApp.GetLocalIPs();
-                    const ipSelect = document.getElementById('ip');
+                    var ipSelect = document.getElementById('ip');
                     ipSelect.innerHTML = '';
-                    ips.forEach(ip => {
-                        const option = document.createElement('option');
-                        option.value = ip;
-                        option.text = ip + (ip === '127.0.0.1' ? ' (本地)' : ip === '0.0.0.0' ? ' (所有网卡)' : '');
+                    for (var i = 0; i < ips.length; i++) {
+                        var ipInfo = ips[i];
+                        var option = document.createElement('option');
+                        option.value = ipInfo.ip;
+                        option.text = ipInfo.ip + ' (' + ipInfo.name + ')';
                         ipSelect.appendChild(option);
-                    });
+                    }
                 }
             } catch(e) {
                 console.error('获取IP列表失败:', e);
@@ -655,21 +678,173 @@ func getHTML() string {
         };
 
         function showMessage(text, isError) {
-            const msg = document.getElementById('message');
-            msg.textContent = text;
+            var msg = document.getElementById('message');
             msg.className = 'message ' + (isError ? 'error' : 'success') + ' show';
+            
+            // 检查是否是启动成功消息（包含访问地址）
+            if (!isError && text.indexOf('服务器启动成功！') !== -1 && text.indexOf('访问地址:') !== -1) {
+                // 提取访问地址
+                var urlMatch = text.match(/访问地址: (http:\/\/[^\n]+)/);
+                if (urlMatch && urlMatch[1]) {
+                    var url = urlMatch[1];
+                    // 构建包含按钮的HTML
+                    msg.innerHTML = text + 
+                        '<div style="margin-top: 10px; display: flex; gap: 10px;">' +
+                            '<button onclick="copyToClipboard(\'' + url + '\')" style="padding: 6px 12px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">' +
+                                '复制链接' +
+                            '</button>' +
+                            '<button onclick="showQRCode(\'' + url + '\')" style="padding: 6px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">' +
+                                '二维码' +
+                            '</button>' +
+                        '</div>';
+                } else {
+                    msg.textContent = text;
+                }
+            } else {
+                msg.textContent = text;
+            }
+            
             // 只有错误信息才自动消失，成功信息保持显示
             if (isError) {
-                setTimeout(() => {
+                setTimeout(function() {
                     msg.classList.remove('show');
                 }, 5000);
             }
+        }
+        
+        // 复制到剪贴板功能
+        function copyToClipboard(text) {
+            // 检查是否使用了0.0.0.0作为监听地址
+            if (text.indexOf('0.0.0.0') !== -1) {
+                // 获取本机IP列表
+                if (ips && ips.length > 0) {
+                    // 过滤掉0.0.0.0，因为它不是一个可直接访问的地址
+                    var validIps = [];
+                    for (var i = 0; i < ips.length; i++) {
+                        if (ips[i].ip !== '0.0.0.0') {
+                            validIps.push(ips[i]);
+                        }
+                    }
+                    
+                    // 创建IP选择对话框
+                    var ipOptions = '';
+                    for (var i = 0; i < validIps.length; i++) {
+                        var ipInfo = validIps[i];
+                        ipOptions += (i + 1) + '. ' + ipInfo.ip + ' (' + ipInfo.name + ')\n';
+                    }
+                    
+                    // 提示用户选择IP
+                    var choice = prompt('请选择要使用的IP地址:\n' + ipOptions + '\n输入对应数字：');
+                    
+                    if (choice) {
+                        var index = parseInt(choice) - 1;
+                        
+                        if (index >= 0 && index < validIps.length) {
+                            var selectedIp = validIps[index].ip;
+                            // 替换URL中的0.0.0.0为选择的IP
+                            text = text.replace('0.0.0.0', selectedIp);
+                        } else {
+                            alert('无效的选择');
+                            return;
+                        }
+                    } else {
+                        return; // 用户取消选择
+                    }
+                } else {
+                    alert('无法获取本机IP地址');
+                    return;
+                }
+            }
+            
+            navigator.clipboard.writeText(text).then(function() {
+                // 显示复制成功提示
+                var msg = document.getElementById('message');
+                var originalContent = msg.innerHTML;
+                msg.innerHTML = '<span style="color: #28a745;">链接已复制到剪贴板！</span>' + originalContent;
+                setTimeout(function() {
+                    // 恢复原始内容
+                    msg.innerHTML = originalContent;
+                }, 2000);
+            }).catch(function(err) {
+                console.error('复制失败:', err);
+                alert('复制失败，请手动复制');
+            });
+        }
+        
+        // 显示二维码
+        function showQRCode(url) {
+            // 检查是否使用了0.0.0.0作为监听地址
+            if (url.indexOf('0.0.0.0') !== -1) {
+                // 获取本机IP列表
+                if (ips && ips.length > 0) {
+                    // 过滤掉0.0.0.0，因为它不是一个可直接访问的地址
+                    var validIps = [];
+                    for (var i = 0; i < ips.length; i++) {
+                        if (ips[i].ip !== '0.0.0.0') {
+                            validIps.push(ips[i]);
+                        }
+                    }
+                    
+                    // 创建IP选择对话框
+                    var ipOptions = '';
+                    for (var i = 0; i < validIps.length; i++) {
+                        var ipInfo = validIps[i];
+                        ipOptions += (i + 1) + '. ' + ipInfo.ip + ' (' + ipInfo.name + ')\n';
+                    }
+                    
+                    // 提示用户选择IP
+                    var choice = prompt('请选择要使用的IP地址:\n' + ipOptions + '\n输入对应数字：');
+                    
+                    if (choice) {
+                        var index = parseInt(choice) - 1;
+                        
+                        if (index >= 0 && index < validIps.length) {
+                            var selectedIp = validIps[index].ip;
+                            // 替换URL中的0.0.0.0为选择的IP
+                            url = url.replace('0.0.0.0', selectedIp);
+                        } else {
+                            alert('无效的选择');
+                            return;
+                        }
+                    } else {
+                        return; // 用户取消选择
+                    }
+                } else {
+                    alert('无法获取本机IP地址');
+                    return;
+                }
+            }
+            
+            var modal = document.getElementById('qrcodeModal');
+            var container = document.getElementById('qrcodeContainer');
+            var urlElement = document.getElementById('qrcodeUrl');
+            
+            // 清空容器
+            container.innerHTML = '';
+            urlElement.textContent = url;
+            
+            // 使用在线API生成二维码图片
+            var img = document.createElement('img');
+            img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(url);
+            img.alt = 'QR Code';
+            img.style.width = '200px';
+            img.style.height = '200px';
+            container.appendChild(img);
+            
+            // 显示模态框
+            modal.style.display = 'flex';
+        }
+        
+        // 关闭二维码模态框
+        function closeQRCodeModal() {
+            var modal = document.getElementById('qrcodeModal');
+            modal.style.display = 'none';
         }
 
         async function browseDirectory() {
             try {
                 if (wailsApp && wailsApp.SelectDirectory) {
-                    const selectedDir = await wailsApp.SelectDirectory();
+                    var selectedDir = await wailsApp.SelectDirectory();
                     if (selectedDir) {
                         document.getElementById('dir').value = selectedDir;
                     }
@@ -686,9 +861,9 @@ func getHTML() string {
         }
 
         async function start() {
-            const dir = document.getElementById('dir').value.trim();
-            const ip = document.getElementById('ip').value;
-            const port = document.getElementById('port').value.trim();
+            var dir = document.getElementById('dir').value.trim();
+            var ip = document.getElementById('ip').value;
+            var port = document.getElementById('port').value.trim();
 
             if (!dir || !ip || !port) {
                 showMessage('请填写所有字段！', true);
@@ -701,7 +876,7 @@ func getHTML() string {
                     return;
                 }
                 
-                const result = await wailsApp.StartServer(dir, ip, port);
+                var result = await wailsApp.StartServer(dir, ip, port);
                 if (result && result.success) {
                     showMessage(result.message, false);
                     document.getElementById('stopBtn').disabled = false;
@@ -722,7 +897,7 @@ func getHTML() string {
                     return;
                 }
                 
-                const result = await wailsApp.StopServer();
+                var result = await wailsApp.StopServer();
                 if (result && result.success) {
                     showMessage(result.message, false);
                     document.getElementById('stopBtn').disabled = true;
@@ -750,9 +925,13 @@ func getHTML() string {
         async function updateLogs() {
             try {
                 if (wailsApp && wailsApp.GetLogs) {
-                    const logs = await wailsApp.GetLogs();
-                    const logArea = document.getElementById('logArea');
-                    logArea.innerHTML = logs.map(log => '<div class="log-line">' + escapeHtml(log) + '</div>').join('');
+                    var logs = await wailsApp.GetLogs();
+                    var logArea = document.getElementById('logArea');
+                    var logHTML = '';
+                    for (var i = 0; i < logs.length; i++) {
+                        logHTML += '<div class="log-line">' + escapeHtml(logs[i]) + '</div>';
+                    }
+                    logArea.innerHTML = logHTML;
                     logArea.scrollTop = logArea.scrollHeight;
                 }
             } catch(e) {
@@ -761,7 +940,7 @@ func getHTML() string {
         }
 
         function escapeHtml(text) {
-            const div = document.createElement('div');
+            var div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
