@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "http-server",
+  "outputfilename": "static-server",
+  "frontend": {
+    "dir": "",
+    "install": "",
+    "build": "",
+    "dev": "",
+    "bridge": "",
+    "serve": ""
+  },
+  "author": {
+    "name": "",
+    "email": ""
+  },
+  "info": {
+    "productName": "静态目录服务器",
+    "productVersion": "1.0.0",
+    "copyright": "",
+    "comments": ""
+  }
+}

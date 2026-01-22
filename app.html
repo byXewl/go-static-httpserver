@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>静态目录服务器</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+        .input-group input {
+            flex: 1;
+        }
+        .input-group button {
+            padding: 8px 15px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .input-group button:hover {
+            background: #0056b3;
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            flex: 1;
+        }
+        .btn-start {
+            background: #28a745;
+            color: white;
+        }
+        .btn-start:hover {
+            background: #218838;
+        }
+        .btn-stop {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-stop:hover {
+            background: #c82333;
+        }
+        .btn-clear {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-clear:hover {
+            background: #5a6268;
+        }
+        .btn-stop:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .log-area {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+        }
+        .log-line {
+            padding: 2px 0;
+            color: #333;
+        }
+        .message {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .message.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>静态目录服务器配置</h1>
+        
+        <div class="form-group">
+            <label>静态目录:</label>
+            <div class="input-group">
+                <input type="text" id="dir" placeholder="选择或输入静态文件目录" value="./public">
+                <button onclick="browseDirectory()">浏览...</button>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>监听网卡:</label>
+            <select id="ip">
+                <option value="127.0.0.1">127.0.0.1 (本地)</option>
+                <option value="0.0.0.0">0.0.0.0 (所有网卡)</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>监听端口:</label>
+            <input type="text" id="port" placeholder="1-65535" value="8085">
+        </div>
+
+        <div class="button-group">
+            <button class="btn-start" onclick="start()">启动服务器</button>
+            <button class="btn-stop" id="stopBtn" onclick="stop()" disabled>停止服务器</button>
+            <button class="btn-clear" onclick="clearLog()">清空日志</button>
+        </div>
+
+        <div id="message" class="message"></div>
+
+        <div class="form-group">
+            <label>运行日志:</label>
+            <div class="log-area" id="logArea"></div>
+        </div>
+    </div>
+
+    <script>
+        let ips = [];
+        
+        // 页面加载时获取IP列表
+        window.onload = function() {
+            try {
+                ips = window.go.main.App.GetLocalIPs();
+                const ipSelect = document.getElementById('ip');
+                ipSelect.innerHTML = '';
+                ips.forEach(ip => {
+                    const option = document.createElement('option');
+                    option.value = ip;
+                    option.text = ip + (ip === '127.0.0.1' ? ' (本地)' : ip === '0.0.0.0' ? ' (所有网卡)' : '');
+                    ipSelect.appendChild(option);
+                });
+            } catch(e) {
+                console.error('获取IP列表失败:', e);
+            }
+            updateLogs();
+            setInterval(updateLogs, 1000);
+        };
+
+        function showMessage(text, isError) {
+            const msg = document.getElementById('message');
+            msg.textContent = text;
+            msg.className = 'message ' + (isError ? 'error' : 'success') + ' show';
+            setTimeout(() => {
+                msg.classList.remove('show');
+            }, 5000);
+        }
+
+        function browseDirectory() {
+            // 由于webview限制，这里只能提示用户手动输入
+            const dir = prompt('请输入静态文件目录路径:', document.getElementById('dir').value);
+            if (dir) {
+                document.getElementById('dir').value = dir;
+            }
+        }
+
+        async function start() {
+            const dir = document.getElementById('dir').value.trim();
+            const ip = document.getElementById('ip').value;
+            const port = document.getElementById('port').value.trim();
+
+            if (!dir || !ip || !port) {
+                showMessage('请填写所有字段！', true);
+                return;
+            }
+
+            try {
+                const result = window.go.main.App.StartServer(dir, ip, port);
+                if (result.success) {
+                    showMessage(result.message, false);
+                    document.getElementById('stopBtn').disabled = false;
+                    document.querySelector('.btn-start').disabled = true;
+                } else {
+                    showMessage(result.message, true);
+                }
+            } catch(e) {
+                showMessage('启动失败: ' + e.message, true);
+            }
+        }
+
+        async function stop() {
+            try {
+                const result = window.go.main.App.StopServer();
+                if (result.success) {
+                    showMessage(result.message, false);
+                    document.getElementById('stopBtn').disabled = true;
+                    document.querySelector('.btn-start').disabled = false;
+                } else {
+                    showMessage(result.message, true);
+                }
+            } catch(e) {
+                showMessage('停止失败: ' + e.message, true);
+            }
+        }
+
+        function clearLog() {
+            window.go.main.App.ClearLogs();
+            document.getElementById('logArea').innerHTML = '';
+        }
+
+        function updateLogs() {
+            try {
+                const logs = window.go.main.App.GetLogs();
+                const logArea = document.getElementById('logArea');
+                logArea.innerHTML = logs.map(log => '<div class="log-line">' + escapeHtml(log) + '</div>').join('');
+                logArea.scrollTop = logArea.scrollHeight;
+            } catch(e) {
+                console.error('更新日志失败:', e);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
