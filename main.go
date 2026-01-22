@@ -296,7 +296,9 @@ func main() {
 
 	// Create application with options
 	err := wails.Run(&options.App{
-		Title:  "静态目录服务器",
+		Title: "静态目录服务器 - byXe",
+		// 也可以设置为其他标题，例如：
+		// Title:  "My Static Server",
 		Width:  700,
 		Height: 600,
 		AssetServer: &assetserver.Options{
@@ -354,7 +356,7 @@ func getHTML() string {
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>静态目录服务器</title>
+    <title>静态目录服务器 - byXe</title>
     <style>
         * {
             margin: 0;
@@ -502,7 +504,7 @@ func getHTML() string {
         <div class="form-group">
             <label>静态目录:</label>
             <div class="input-group">
-                <input type="text" id="dir" placeholder="选择或输入静态文件目录" value="./public">
+                <input type="text" id="dir" placeholder="选择或输入静态文件目录" value="./">
                 <button onclick="browseDirectory()">浏览...</button>
             </div>
         </div>
