@@ -86,10 +86,7 @@ func (a *App) GetLocalIPs() []IPInfo {
 				if !found {
 					// 提取网卡名称作为来源标识
 					name := iface.Name
-					// 尝试简化网卡名称，使其更友好
-					if len(name) > 10 {
-						name = name[:10] + "..."
-					}
+					// 完整显示网卡名称，不进行截断
 					ips = append(ips, IPInfo{IP: ipStr, Name: name})
 				}
 			}
