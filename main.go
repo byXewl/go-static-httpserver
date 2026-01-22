@@ -670,21 +670,16 @@ func getHTML() string {
                     const selectedDir = await wailsApp.SelectDirectory();
                     if (selectedDir) {
                         document.getElementById('dir').value = selectedDir;
-                        return;
                     }
+                    // 不再使用降级方案，避免显示输入框
+                    return;
                 }
-                // 降级方案：使用输入框
-                const dir = prompt('请输入静态文件目录路径:', document.getElementById('dir').value);
-                if (dir) {
-                    document.getElementById('dir').value = dir;
-                }
+                // 如果没有SelectDirectory方法，则直接返回
+                return;
             } catch (e) {
                 console.error('选择目录失败:', e);
-                // 出错时使用降级方案
-                const dir = prompt('请输入静态文件目录路径:', document.getElementById('dir').value);
-                if (dir) {
-                    document.getElementById('dir').value = dir;
-                }
+                // 出错时直接返回，不显示输入框
+                return;
             }
         }
 
