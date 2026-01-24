@@ -8,10 +8,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/skip2/go-qrcode"
 	"github.com/wailsapp/wails/v2"
@@ -26,6 +30,7 @@ type App struct {
 	server    *http.Server
 	mu        sync.Mutex
 	isRunning bool
+	saveLogs  bool
 	logs      []string
 	logMu     sync.Mutex
 }
@@ -95,6 +100,595 @@ func (a *App) GetLocalIPs() []IPInfo {
 	}
 
 	return ips
+}
+
+// handleFileRequest handles file serving, uploads, and folder creation
+func (a *App) handleFileRequest(root string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Handle POST requests
+		if r.Method == "POST" {
+			// Check if it's a folder creation or file creation request
+			contentType := r.Header.Get("Content-Type")
+			if strings.Contains(contentType, "application/json") {
+				a.handleJSONRequest(w, r, root)
+				return
+			}
+			// Otherwise handle file upload
+			a.handleUpload(w, r, root)
+			return
+		}
+
+		// Handle File Serving / Directory Listing
+		fullPath := filepath.Join(root, strings.TrimPrefix(path, "/"))
+
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.NotFound(w, r)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		if info.IsDir() {
+			// Check for index.html
+			indexFile := filepath.Join(fullPath, "index.html")
+			if _, err := os.Stat(indexFile); err == nil {
+				http.ServeFile(w, r, indexFile)
+				return
+			}
+
+			// Serve directory listing
+			a.serveDirectory(w, r, fullPath, path)
+		} else {
+			http.ServeFile(w, r, fullPath)
+		}
+	}
+}
+
+// handleUpload handles file uploads
+func (a *App) handleUpload(w http.ResponseWriter, r *http.Request, root string) {
+	// Parse multipart form, max 32MB
+	err := r.ParseMultipartForm(32 << 20)
+	if err != nil {
+		http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	files := r.MultipartForm.File["files"]
+	if len(files) == 0 {
+		http.Error(w, "No files uploaded", http.StatusBadRequest)
+		return
+	}
+
+	uploadDir := filepath.Join(root, strings.TrimPrefix(r.URL.Path, "/"))
+	// Ensure uploadDir exists and is a directory
+	info, err := os.Stat(uploadDir)
+	if err != nil || !info.IsDir() {
+		http.Error(w, "Invalid upload directory", http.StatusBadRequest)
+		return
+	}
+
+	for _, fileHeader := range files {
+		file, err := fileHeader.Open()
+		if err != nil {
+			a.addLog(fmt.Sprintf("Error opening uploaded file: %v", err))
+			continue
+		}
+
+		// Prevent directory traversal in filename
+		filename := filepath.Base(fileHeader.Filename)
+		dstPath := filepath.Join(uploadDir, filename)
+
+		dst, err := os.Create(dstPath)
+		if err != nil {
+			file.Close()
+			a.addLog(fmt.Sprintf("Error creating file %s: %v", dstPath, err))
+			continue
+		}
+
+		if _, err := io.Copy(dst, file); err != nil {
+			a.addLog(fmt.Sprintf("Error saving file %s: %v", dstPath, err))
+		} else {
+			a.addLog(fmt.Sprintf("File uploaded: %s", dstPath))
+		}
+
+		dst.Close()
+		file.Close()
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleFolderCreation handles folder creation requests
+func (a *App) handleFolderCreation(w http.ResponseWriter, r *http.Request, root string) {
+	// Parse JSON request
+	var req struct {
+		Action string `json:"action"`
+		Name   string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Check if it's a folder creation request
+	if req.Action != "createFolder" {
+		http.Error(w, "Invalid action", http.StatusBadRequest)
+		return
+	}
+
+	// Validate folder name
+	if req.Name == "" {
+		http.Error(w, "Folder name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Prevent directory traversal
+	if strings.Contains(req.Name, "/") || strings.Contains(req.Name, "\\") || strings.Contains(req.Name, "..") {
+		http.Error(w, "Invalid folder name", http.StatusBadRequest)
+		return
+	}
+
+	// Get target directory
+	targetDir := filepath.Join(root, strings.TrimPrefix(r.URL.Path, "/"))
+
+	// Ensure target directory exists and is a directory
+	info, err := os.Stat(targetDir)
+	if err != nil || !info.IsDir() {
+		http.Error(w, "Invalid target directory", http.StatusBadRequest)
+		return
+	}
+
+	// Create full path for new folder
+	newFolderPath := filepath.Join(targetDir, req.Name)
+
+	// Check if folder already exists
+	if _, err := os.Stat(newFolderPath); err == nil {
+		http.Error(w, "Folder already exists", http.StatusConflict)
+		return
+	}
+
+	// Create the folder
+	if err := os.MkdirAll(newFolderPath, 0755); err != nil {
+		http.Error(w, "Failed to create folder: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Log the folder creation
+	a.addLog(fmt.Sprintf("Folder created: %s", newFolderPath))
+
+	// Return success
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Folder created successfully"))
+}
+
+// handleFileCreation handles file creation requests
+func (a *App) handleFileCreation(w http.ResponseWriter, r *http.Request, root string) {
+	// Parse JSON request
+	var req struct {
+		Action string `json:"action"`
+		Name   string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Check if it's a file creation request
+	if req.Action != "createFile" {
+		http.Error(w, "Invalid action", http.StatusBadRequest)
+		return
+	}
+
+	// Validate file name
+	if req.Name == "" {
+		http.Error(w, "File name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Prevent directory traversal
+	if strings.Contains(req.Name, "/") || strings.Contains(req.Name, "\\") || strings.Contains(req.Name, "..") {
+		http.Error(w, "Invalid file name", http.StatusBadRequest)
+		return
+	}
+
+	// Get target directory
+	targetDir := filepath.Join(root, strings.TrimPrefix(r.URL.Path, "/"))
+
+	// Ensure target directory exists and is a directory
+	info, err := os.Stat(targetDir)
+	if err != nil || !info.IsDir() {
+		http.Error(w, "Invalid target directory", http.StatusBadRequest)
+		return
+	}
+
+	// Create full path for new file
+	newFilePath := filepath.Join(targetDir, req.Name)
+
+	// Check if file already exists
+	if _, err := os.Stat(newFilePath); err == nil {
+		http.Error(w, "File already exists", http.StatusConflict)
+		return
+	}
+
+	// Create the file
+	if _, err := os.Create(newFilePath); err != nil {
+		http.Error(w, "Failed to create file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Log the file creation
+	a.addLog(fmt.Sprintf("File created: %s", newFilePath))
+
+	// Return success
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("File created successfully"))
+}
+
+// handleJSONRequest handles JSON requests and routes to the appropriate handler
+func (a *App) handleJSONRequest(w http.ResponseWriter, r *http.Request, root string) {
+	// Parse JSON request to get the action
+	var req struct {
+		Action string `json:"action"`
+	}
+
+	// Read the request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Reset the request body so it can be read again
+	r.Body = io.NopCloser(strings.NewReader(string(body)))
+
+	// Parse the action
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "Invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Reset the request body again for the actual handler
+	r.Body = io.NopCloser(strings.NewReader(string(body)))
+
+	// Route to the appropriate handler based on action
+	if req.Action == "createFolder" {
+		a.handleFolderCreation(w, r, root)
+	} else if req.Action == "createFile" {
+		a.handleFileCreation(w, r, root)
+	} else {
+		http.Error(w, "Invalid action", http.StatusBadRequest)
+	}
+}
+
+// serveDirectory serves a custom directory listing with upload button
+func (a *App) serveDirectory(w http.ResponseWriter, r *http.Request, dirPath, requestPath string) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Sort entries: directories first, then files
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].IsDir() && !entries[j].IsDir() {
+			return true
+		}
+		if !entries[i].IsDir() && entries[j].IsDir() {
+			return false
+		}
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// Generate HTML
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Index of %s</title>
+	<style>
+			body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; line-height: 1.5; background-color: #fff; color: #333; }
+			h1 { margin-bottom: 20px; border-bottom: 1px solid #eaeaea; padding-bottom: 10px; font-size: 24px; }
+			ul { list-style: none; padding: 0; }
+			li { padding: 10px 0; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; }
+			li:hover { background-color: #f8f9fa; }
+			a { text-decoration: none; color: #007bff; flex-grow: 1; display: block; margin-left: 10px; }
+			a:hover { text-decoration: underline; }
+			.icon { width: 24px; text-align: center; display: inline-block; font-size: 1.2em; }
+			.size { color: #666; font-size: 0.9em; margin-left: 20px; min-width: 80px; text-align: right; }
+			.fab {
+				position: fixed;
+				bottom: 30px;
+				right: 30px;
+				width: 60px;
+				height: 60px;
+				border-radius: 50%%;
+				background-color: #007bff;
+				color: white;
+				font-size: 30px;
+				border: none;
+				box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+				cursor: pointer;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				transition: background-color 0.3s, transform 0.2s;
+				z-index: 1000;
+			}
+			.fab:hover { background-color: #0056b3; transform: scale(1.05); }
+			.fab:active { transform: scale(0.95); }
+			
+			/* Modal styles */
+			.modal {
+				display: none;
+				position: fixed;
+				z-index: 2000;
+				left: 0;
+				top: 0;
+				width: 100%;
+				height: 100%;
+				overflow: auto;
+				background-color: rgba(0,0,0,0.4);
+			}
+			.modal-content {
+				background-color: rgba(255, 255, 255, 0.95);
+				position: absolute;
+				right: 30px;
+				top: 30px;
+				padding: 20px;
+				border: 1px solid rgba(136, 136, 136, 0.5);
+				width: 300px;
+				border-radius: 8px;
+				box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+				backdrop-filter: blur(5px);
+			}
+			.modal-content h3 {
+				margin-top: 0;
+				color: #333;
+			}
+			.modal-content input {
+				width: 100%;
+				padding: 10px;
+				margin: 10px 0 20px 0;
+				border: 1px solid #ddd;
+				border-radius: 4px;
+				box-sizing: border-box;
+			}
+			.modal-buttons {
+				display: flex;
+				gap: 10px;
+				justify-content: flex-end;
+			}
+			.modal-buttons button {
+				padding: 8px 16px;
+				border: none;
+				border-radius: 4px;
+				cursor: pointer;
+				font-size: 14px;
+			}
+			.modal-buttons .btn-create {
+				background-color: #28a745;
+				color: white;
+			}
+			.modal-buttons .btn-create:hover {
+				background-color: #218838;
+			}
+			.modal-buttons .btn-cancel {
+				background-color: #6c757d;
+				color: white;
+			}
+			.modal-buttons .btn-cancel:hover {
+				background-color: #5a6268;
+			}
+		</style>
+</head>
+<body>
+	<h1>Index of %s</h1>
+	<ul>`, requestPath, requestPath)
+
+	// Parent directory link
+	if requestPath != "/" {
+		parent := filepath.Dir(strings.TrimSuffix(requestPath, "/"))
+		// Fix Windows path issues when filepath.Dir returns \
+		parent = strings.ReplaceAll(parent, "\\", "/")
+		if !strings.HasPrefix(parent, "/") {
+			parent = "/" + parent
+		}
+		fmt.Fprintf(w, `<li><span class="icon">📁</span><a href="%s">..</a></li>`, parent)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		isDir := entry.IsDir()
+		icon := "📄"
+		if isDir {
+			icon = "📁"
+		}
+
+		// Encode URL
+		urlPath := url.PathEscape(name)
+		if isDir {
+			urlPath += "/"
+		}
+
+		// Get size
+		sizeStr := "-"
+		if !isDir {
+			info, err := entry.Info()
+			if err == nil {
+				sizeStr = formatSize(info.Size())
+			}
+		}
+
+		displayName := name
+		if isDir {
+			displayName += "/"
+		}
+
+		fmt.Fprintf(w, `<li><span class="icon">%s</span><a href="%s">%s</a><span class="size">%s</span></li>`,
+			icon, urlPath, displayName, sizeStr)
+	}
+
+	fmt.Fprintf(w, `</ul>
+
+	<button class="fab" onclick="toggleActions()" title="Actions">+</button>
+	<input type="file" id="file-upload" style="display: none" multiple onchange="uploadFiles(this.files)">
+
+	<!-- Action Menu -->
+	<div id="action-menu" style="display: none; position: fixed; bottom: 100px; right: 30px; background: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 999; padding: 10px; min-width: 150px;">
+		<button onclick="event.stopPropagation(); document.getElementById('file-upload').click(); document.getElementById('action-menu').style.display = 'none';" style="width: 100%; padding: 10px; text-align: left; border: none; background: none; cursor: pointer; border-radius: 4px; margin: 2px 0;">
+			📤 上传文件
+		</button>
+		<button onclick="event.stopPropagation(); createFolder(); document.getElementById('action-menu').style.display = 'none';" style="width: 100%; padding: 10px; text-align: left; border: none; background: none; cursor: pointer; border-radius: 4px; margin: 2px 0;">
+			📁 创建文件夹
+		</button>
+		<button onclick="event.stopPropagation(); createFile(); document.getElementById('action-menu').style.display = 'none';" style="width: 100%; padding: 10px; text-align: left; border: none; background: none; cursor: pointer; border-radius: 4px; margin: 2px 0;">
+			📄 创建文件
+		</button>
+	</div>
+
+	<script>
+		// Toggle action menu
+		function toggleActions() {
+			const menu = document.getElementById('action-menu');
+			menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+		}
+
+		// Close menu when clicking outside
+		document.addEventListener('click', function(event) {
+			const menu = document.getElementById('action-menu');
+			const fab = document.querySelector('.fab');
+			if (!menu.contains(event.target) && !fab.contains(event.target)) {
+				menu.style.display = 'none';
+			}
+		});
+
+		// Folder creation function
+		function createFolder() {
+			const folderName = prompt('请输入文件夹名称:');
+			if (!folderName || folderName.trim() === '') {
+				return; // 用户取消或输入为空
+			}
+
+			const trimmedName = folderName.trim();
+
+			// Validate folder name
+			if (trimmedName.includes('/') || trimmedName.includes('\\') || trimmedName.includes('..')) {
+				alert('无效的文件夹名称');
+				return;
+			}
+
+			// Send request to create folder
+			fetch(window.location.href, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({ action: 'createFolder', name: trimmedName })
+			}).then(response => {
+				if (response.ok) {
+					location.reload();
+				} else {
+					return response.text().then(text => {
+						alert('创建文件夹失败: ' + text);
+					});
+				}
+			}).catch(err => {
+				alert('错误: ' + err);
+			});
+		}
+
+		// File creation function
+		function createFile() {
+			const fileName = prompt('请输入文件名称:');
+			if (!fileName || fileName.trim() === '') {
+				return; // 用户取消或输入为空
+			}
+
+			const trimmedName = fileName.trim();
+
+			// Validate file name
+			if (trimmedName.includes('/') || trimmedName.includes('\\') || trimmedName.includes('..')) {
+				alert('无效的文件名称');
+				return;
+			}
+
+			// Send request to create file
+			fetch(window.location.href, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({ action: 'createFile', name: trimmedName })
+			}).then(response => {
+				if (response.ok) {
+					location.reload();
+				} else {
+					return response.text().then(text => {
+						alert('创建文件失败: ' + text);
+					});
+				}
+			}).catch(err => {
+				alert('错误: ' + err);
+			});
+		}
+
+		// Upload files function
+		function uploadFiles(files) {
+			if (!files.length) return;
+
+			const formData = new FormData();
+			for (let i = 0; i < files.length; i++) {
+				formData.append('files', files[i]);
+			}
+
+			const btn = document.querySelector('.fab');
+			const originalText = btn.innerText;
+			btn.innerText = '...';
+			btn.disabled = true;
+
+			fetch(window.location.href, {
+				method: 'POST',
+				body: formData
+			}).then(response => {
+				if (response.ok) {
+					location.reload();
+				} else {
+					alert('Upload failed: ' + response.statusText);
+				}
+			}).catch(err => {
+				alert('Error: ' + err);
+			}).finally(() => {
+				btn.innerText = originalText;
+				btn.disabled = false;
+				document.getElementById('file-upload').value = '';
+			});
+		}
+	</script>
+</body>
+</html>`)
+}
+
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // StartServer 启动服务器
@@ -183,22 +777,79 @@ func (a *App) StartServer(dir, ip, port string) map[string]interface{} {
 	// 创建新的HTTP服务器
 	mux := http.NewServeMux()
 
-	// API路由
-	mux.HandleFunc("/api/get", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "yes")
-	})
-
-	mux.HandleFunc("/api/getjson", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		response := map[string]string{
-			"message": "Hello, this is JSON response",
+	// 动态路由：/api/get/{id} -> 读取 api/txt/{id}.txt
+	mux.HandleFunc("/api/get/", func(w http.ResponseWriter, r *http.Request) {
+		// 获取ID
+		id := strings.TrimPrefix(r.URL.Path, "/api/get/")
+		if id == "" {
+			http.NotFound(w, r)
+			return
 		}
-		json.NewEncoder(w).Encode(response)
+
+		// 安全检查：防止目录遍历
+		if strings.Contains(id, "..") || strings.Contains(id, "/") || strings.Contains(id, "\\") {
+			http.Error(w, "Invalid ID", http.StatusBadRequest)
+			return
+		}
+
+		// 构建文件路径：api/txt/{id}.txt
+		filePath := filepath.Join("api", "txt", id+".txt")
+
+		// 读取文件内容
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.NotFound(w, r)
+			} else {
+				// 记录错误日志但不暴露给客户端详细路径
+				log.Printf("Error reading file %s: %v", filePath, err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+			return
+		}
+
+		// 设置响应头为 JSON
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(content)
 	})
 
-	// 静态文件服务器
-	staticDir := http.Dir(absDir)
-	mux.Handle("/", http.FileServer(staticDir))
+	// 动态路由：/api/getjson/{id} -> 读取 api/json/{id}.json
+	mux.HandleFunc("/api/getjson/", func(w http.ResponseWriter, r *http.Request) {
+		// 获取ID
+		id := strings.TrimPrefix(r.URL.Path, "/api/getjson/")
+		if id == "" {
+			http.NotFound(w, r)
+			return
+		}
+
+		// 安全检查
+		if strings.Contains(id, "..") || strings.Contains(id, "/") || strings.Contains(id, "\\") {
+			http.Error(w, "Invalid ID", http.StatusBadRequest)
+			return
+		}
+
+		// 构建文件路径：api/json/{id}.json
+		filePath := filepath.Join("api", "json", id+".json")
+
+		// 读取文件内容
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.NotFound(w, r)
+			} else {
+				log.Printf("Error reading file %s: %v", filePath, err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+			return
+		}
+
+		// 设置响应头为 JSON
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(content)
+	})
+
+	// 静态文件服务器 (使用自定义处理器支持上传)
+	mux.HandleFunc("/", a.handleFileRequest(absDir))
 
 	a.server = &http.Server{
 		Addr:    addr,
@@ -211,8 +862,8 @@ func (a *App) StartServer(dir, ip, port string) map[string]interface{} {
 		a.addLog(fmt.Sprintf("静态目录: %s", absDir))
 		a.addLog(fmt.Sprintf("监听地址: %s", addr))
 		a.addLog(fmt.Sprintf("访问地址: http://%s/", addr))
-		a.addLog(fmt.Sprintf("API接口: http://%s/api/get", addr))
-		a.addLog(fmt.Sprintf("API接口: http://%s/api/getjson", addr))
+		a.addLog(fmt.Sprintf("API接口(示例): http://%s/api/get/2  ==> 响应./api/txt/2.txt", addr))
+		a.addLog(fmt.Sprintf("API接口(json示例): http://%s/api/getjson/1 ==> 响应./api/json/1.json", addr))
 		a.addLog("----------------------------------------")
 
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -298,6 +949,21 @@ func (a *App) addLog(message string) {
 	if len(a.logs) > 100 {
 		a.logs = a.logs[len(a.logs)-100:]
 	}
+
+	// 如果开启了日志保存，写入文件
+	if a.saveLogs {
+		logDir := "log"
+		if err := os.MkdirAll(logDir, 0755); err == nil {
+			timestamp := time.Now().Format("2006-01-02 15:04:05")
+			logMsg := fmt.Sprintf("[%s] %s\n", timestamp, message)
+
+			f, err := os.OpenFile(filepath.Join(logDir, "log.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				defer f.Close()
+				f.WriteString(logMsg)
+			}
+		}
+	}
 }
 
 func main() {
@@ -340,6 +1006,20 @@ func main() {
 					json.NewEncoder(w).Encode(logs)
 				} else if r.URL.Path == "/api/clearLogs" && r.Method == "POST" {
 					app.ClearLogs()
+					w.WriteHeader(http.StatusOK)
+				} else if r.URL.Path == "/api/toggleSaveLogs" && r.Method == "POST" {
+					var req struct {
+						Enable bool `json:"enable"`
+					}
+					json.NewDecoder(r.Body).Decode(&req)
+					app.logMu.Lock()
+					app.saveLogs = req.Enable
+					app.logMu.Unlock()
+					if req.Enable {
+						app.addLog("日志保存已开启")
+					} else {
+						app.addLog("日志保存已关闭")
+					}
 					w.WriteHeader(http.StatusOK)
 				} else if r.URL.Path == "/api/selectDirectory" {
 					result := app.SelectDirectory()
@@ -561,6 +1241,10 @@ func getHTML() string {
             <button class="btn-start" onclick="start()">启动服务器</button>
             <button class="btn-stop" id="stopBtn" onclick="stop()" disabled>停止服务器</button>
             <button class="btn-clear" onclick="clearLog()">清空日志</button>
+        </div>
+        <div style="margin-top: 10px; display: flex; align-items: center;">
+            <input type="checkbox" id="saveLogs" onchange="toggleSaveLogs(this.checked)" style="width: auto; margin-right: 8px;">
+            <label for="saveLogs" style="display: inline; margin: 0; cursor: pointer;">开启日志保留 (./log/log.txt)</label>
         </div>
 
         <div id="message" class="message"></div>
@@ -943,6 +1627,17 @@ func getHTML() string {
             } catch(e) {
                 console.error('清空日志失败:', e);
             }
+        }
+
+        function toggleSaveLogs(enable) {
+            fetch('/api/toggleSaveLogs', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ enable: enable })
+            })
+            .catch(error => showMessage('设置日志保存失败: ' + error, 'error'));
         }
 
         async function updateLogs() {
