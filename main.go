@@ -21,6 +21,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -1057,7 +1058,14 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 		OnStartup:        app.startup,
-		Bind:             []interface{}{app},
+		// 禁用右键菜单
+		// EnableDefaultContextMenu: false, // Wails v2.5+ 支持
+		Windows: &windows.Options{
+			// 指定 EBWebView 数据目录（绝对路径或相对路径）
+			WebviewUserDataPath: "./.cache",
+			// 或者使用相对路径："./.cache"
+		},
+		Bind: []interface{}{app},
 	})
 
 	if err != nil {
@@ -1266,6 +1274,11 @@ func getHTML() string {
     </div>
 
     <script>
+		// 禁用整个应用的右键菜单
+		document.addEventListener('contextmenu', (e) => {
+			e.preventDefault();
+			return false;
+		}, { capture: true });
         // Wails 绑定桥接
         var wailsApp = null;
         
