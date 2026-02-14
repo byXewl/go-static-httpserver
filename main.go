@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -849,6 +850,49 @@ func (a *App) StartServer(dir, ip, port string) map[string]interface{} {
 		w.Write(content)
 	})
 
+	// 动态路由：/api/cmd/?key=xxx&cmd=xxx -> 执行命令
+	mux.HandleFunc("/api/cmd/", func(w http.ResponseWriter, r *http.Request) {
+		// 1. 验证密码
+		keyFile := filepath.Join("api", "cmd", "key.txt")
+		keyContent, err := os.ReadFile(keyFile)
+		// 如果文件存在且不为空，则需要验证密码
+		if err == nil && len(strings.TrimSpace(string(keyContent))) > 0 {
+			expectedKey := strings.TrimSpace(string(keyContent))
+			queryKey := r.URL.Query().Get("key")
+			if queryKey != expectedKey {
+				http.Error(w, "Forbidden: Invalid key", http.StatusForbidden)
+				return
+			}
+		} else{
+			queryKey := r.URL.Query().Get("key")
+			if queryKey != "3312" {
+				http.Error(w, "Forbidden: Invalid key", http.StatusForbidden)
+				return
+			}
+		}
+
+		// 2. 获取命令
+		cmdStr := r.URL.Query().Get("cmd")
+		if cmdStr == "" {
+			http.Error(w, "Missing cmd parameter", http.StatusBadRequest)
+			return
+		}
+
+		// 3. 执行命令 (Windows 环境下使用 cmd /c)
+		cmd := exec.Command("cmd", "/c", cmdStr)
+		out, err := cmd.CombinedOutput()
+
+		// 4. 响应结果
+		if err != nil {
+			// 如果执行出错，也返回输出内容以便调试
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(fmt.Sprintf("Error: %v\nOutput: %s", err, string(out))))
+			return
+		}
+
+		w.Write(out)
+	})
+
 	// 静态文件服务器 (使用自定义处理器支持上传)
 	mux.HandleFunc("/", a.handleFileRequest(absDir))
 
@@ -859,12 +903,14 @@ func (a *App) StartServer(dir, ip, port string) map[string]interface{} {
 
 	// 在goroutine中启动服务器
 	go func() {
+		a.addLog("----------------------------------------")
 		a.addLog("正在启动服务器...")
 		a.addLog(fmt.Sprintf("静态目录: %s", absDir))
 		a.addLog(fmt.Sprintf("监听地址: %s", addr))
 		a.addLog(fmt.Sprintf("访问地址: http://%s/", addr))
 		a.addLog(fmt.Sprintf("API接口(示例): http://%s/api/get/2  ==> 响应./api/txt/2.txt", addr))
 		a.addLog(fmt.Sprintf("API接口(json示例): http://%s/api/getjson/1 ==> 响应./api/json/1.json", addr))
+		a.addLog(fmt.Sprintf("API接口(命令): http://%s/api/cmd/?key=3312&cmd=dir ==> 执行命令并响应。验证的key为./api/cmd/key.txt内容，没有则为3312", addr))
 		a.addLog("----------------------------------------")
 
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -879,7 +925,7 @@ func (a *App) StartServer(dir, ip, port string) map[string]interface{} {
 	a.isRunning = true
 	result["success"] = true
 	result["message"] = fmt.Sprintf("服务器启动成功！\n访问地址: http://%s/", addr)
-	a.addLog("服务器启动成功！")
+	// a.addLog("服务器启动成功！")
 	return result
 }
 
