@@ -136,6 +136,12 @@ func (a *App) handleFileRequest(root string) http.HandlerFunc {
 		}
 
 		if info.IsDir() {
+			// Ensure directory path ends with / for correct relative link resolution
+			if !strings.HasSuffix(path, "/") {
+				http.Redirect(w, r, path+"/", http.StatusMovedPermanently)
+				return
+			}
+
 			// Check for index.html
 			indexFile := filepath.Join(fullPath, "index.html")
 			if _, err := os.Stat(indexFile); err == nil {
@@ -499,13 +505,7 @@ func (a *App) serveDirectory(w http.ResponseWriter, r *http.Request, dirPath, re
 
 	// Parent directory link
 	if requestPath != "/" {
-		parent := filepath.Dir(strings.TrimSuffix(requestPath, "/"))
-		// Fix Windows path issues when filepath.Dir returns \
-		parent = strings.ReplaceAll(parent, "\\", "/")
-		if !strings.HasPrefix(parent, "/") {
-			parent = "/" + parent
-		}
-		fmt.Fprintf(w, `<li><span class="icon">📁</span><a href="%s">..</a></li>`, parent)
+		fmt.Fprintf(w, `<li><span class="icon">📁</span><a href="../">..</a></li>`)
 	}
 
 	for _, entry := range entries {
@@ -863,7 +863,7 @@ func (a *App) StartServer(dir, ip, port string) map[string]interface{} {
 				http.Error(w, "Forbidden: Invalid key", http.StatusForbidden)
 				return
 			}
-		} else{
+		} else {
 			queryKey := r.URL.Query().Get("key")
 			if queryKey != "3312" {
 				http.Error(w, "Forbidden: Invalid key", http.StatusForbidden)
