@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -375,7 +375,7 @@ func (a *App) handleJSONRequest(w http.ResponseWriter, r *http.Request, root str
 	}
 }
 
-// serveDirectory serves a custom directory listing with upload button
+// serveDirectory serves a custom directory listing with toolbar, sorting, search and upload
 func (a *App) serveDirectory(w http.ResponseWriter, r *http.Request, dirPath, requestPath string) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
@@ -383,301 +383,500 @@ func (a *App) serveDirectory(w http.ResponseWriter, r *http.Request, dirPath, re
 		return
 	}
 
-	// Sort entries: directories first, then files
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir() && !entries[j].IsDir() {
-			return true
+	// 收集条目信息：名称、大小、修改时间、是否目录
+	type dirEntry struct {
+		Name    string `json:"name"`
+		URL     string `json:"url"`
+		IsDir   bool   `json:"isDir"`
+		Size    int64  `json:"size"`
+		ModTime int64  `json:"modTime"`
+	}
+
+	items := make([]dirEntry, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		info, err := entry.Info()
+		if err != nil {
+			continue
 		}
-		if !entries[i].IsDir() && entries[j].IsDir() {
-			return false
+		urlPath := url.PathEscape(name)
+		if entry.IsDir() {
+			urlPath += "/"
 		}
-		return entries[i].Name() < entries[j].Name()
-	})
+		items = append(items, dirEntry{
+			Name:    name,
+			URL:     urlPath,
+			IsDir:   entry.IsDir(),
+			Size:    info.Size(),
+			ModTime: info.ModTime().Unix(),
+		})
+	}
+
+	// 构建面包屑（返回上级）
+	parentLink := ""
+	if requestPath != "/" {
+		parentLink = `<a class="crumb-parent" href="../">↑ 返回上级</a>`
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	// Generate HTML
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html>
+	itemsJSON, err := json.Marshal(items)
+	if err != nil {
+		http.Error(w, "Failed to encode entries", http.StatusInternalServerError)
+		return
+	}
+	for i := 0; i < len(itemsJSON); i++ {
+		if itemsJSON[i] == '`' {
+			itemsJSON[i] = '\''
+		}
+	}
+
+	// 生成 HTML
+	pageHTML := `<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
 	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Index of %s</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+	<title>__TITLE__</title>
 	<style>
-			body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; line-height: 1.5; background-color: #fff; color: #333; }
-			h1 { margin-bottom: 20px; border-bottom: 1px solid #eaeaea; padding-bottom: 10px; font-size: 24px; }
-			ul { list-style: none; padding: 0; }
-			li { padding: 10px 0; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; }
-			li:hover { background-color: #f8f9fa; }
-			a { text-decoration: none; color: #007bff; flex-grow: 1; display: block; margin-left: 10px; }
-			a:hover { text-decoration: underline; }
-			.icon { width: 24px; text-align: center; display: inline-block; font-size: 1.2em; }
-			.size { color: #666; font-size: 0.9em; margin-left: 20px; min-width: 80px; text-align: right; }
-			.fab {
-				position: fixed;
-				bottom: 30px;
-				right: 30px;
-				width: 60px;
-				height: 60px;
-				border-radius: 50%%;
-				background-color: #007bff;
-				color: white;
-				font-size: 30px;
-				border: none;
-				box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-				cursor: pointer;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				transition: background-color 0.3s, transform 0.2s;
-				z-index: 1000;
+		* { box-sizing: border-box; margin: 0; padding: 0; }
+		body {
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+			background-color: #f5f7fa;
+			color: #333;
+			min-height: 100vh;
+		}
+		.container { max-width: 960px; margin: 0 auto; padding: 16px; }
+		.card {
+			background: #fff;
+			border-radius: 10px;
+			box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+			overflow: hidden;
+		}
+
+		/* ---------- 顶部工具栏 ---------- */
+		.toolbar {
+			position: sticky;
+			top: 0;
+			z-index: 100;
+			background: #fff;
+			border-bottom: 1px solid #e8ecf1;
+			padding: 10px 14px;
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			gap: 8px;
+		}
+		.breadcrumb { flex: 1 1 100%; font-size: 14px; color: #555; display: flex; align-items: center; gap: 6px; min-width: 0; }
+		.breadcrumb .loc { color: #333; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.crumb-parent { color: #007bff; text-decoration: none; white-space: nowrap; }
+		.crumb-parent:hover { text-decoration: underline; }
+		.search-box { position: relative; flex: 1 1 180px; min-width: 140px; }
+		.search-box input {
+			width: 100%;
+			padding: 7px 30px 7px 10px;
+			border: 1px solid #d8dee6;
+			border-radius: 6px;
+			font-size: 14px;
+			outline: none;
+			background: #f8fafc;
+		}
+		.search-box input:focus { border-color: #007bff; background: #fff; }
+		.search-box .clear-x {
+			position: absolute;
+			right: 6px;
+			top: 50%;
+			transform: translateY(-50%);
+			border: none;
+			background: none;
+			color: #999;
+			font-size: 16px;
+			cursor: pointer;
+			line-height: 1;
+			padding: 2px 4px;
+		}
+		.search-box .clear-x:hover { color: #333; }
+		.tool-btn {
+			padding: 7px 12px;
+			border: 1px solid #d8dee6;
+			border-radius: 6px;
+			background: #fff;
+			color: #444;
+			font-size: 13px;
+			cursor: pointer;
+			white-space: nowrap;
+			transition: all 0.15s;
+		}
+		.tool-btn:hover { border-color: #007bff; color: #007bff; }
+		.tool-btn.active { background: #007bff; border-color: #007bff; color: #fff; }
+		.tool-btn.primary { background: #28a745; border-color: #28a745; color: #fff; }
+		.tool-btn.primary:hover { background: #218838; border-color: #218838; color: #fff; }
+		.tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+		/* ---------- 列表表头 ---------- */
+		.list-head {
+			display: flex;
+			align-items: center;
+			padding: 9px 16px;
+			background: #fafbfc;
+			border-bottom: 1px solid #eef1f5;
+			font-size: 12px;
+			color: #888;
+			gap: 10px;
+		}
+		.list-head .col-name { flex: 1 1 auto; }
+		.list-head .col-size { width: 90px; text-align: right; }
+		.list-head .col-time { width: 130px; text-align: right; }
+		.list-head button {
+			border: none;
+			background: none;
+			cursor: pointer;
+			color: #777;
+			font-size: 12px;
+			font-weight: 600;
+			padding: 2px 4px;
+			border-radius: 4px;
+		}
+		.list-head button:hover { color: #007bff; }
+		.list-head button.active { color: #007bff; }
+		.list-head .arrow { font-size: 10px; margin-left: 2px; }
+
+		/* ---------- 文件列表 ---------- */
+		ul.file-list { list-style: none; }
+		li.item {
+			display: flex;
+			align-items: center;
+			flex-wrap: wrap;
+			padding: 11px 16px;
+			border-bottom: 1px solid #f2f4f7;
+			gap: 10px;
+			transition: background 0.1s;
+			overflow: hidden;
+		}
+		li.item:last-child { border-bottom: none; }
+		li.item:hover { background: #f0f6ff; }
+		.item .icon { font-size: 18px; width: 24px; text-align: center; flex-shrink: 0; }
+		.item .name {
+			flex: 1 1 auto;
+			min-width: 0;
+			text-decoration: none;
+			color: #007bff;
+			font-size: 14px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+		.item.is-dir .name { color: #333; font-weight: 600; }
+		.item .name:hover { text-decoration: underline; }
+		.item .size { width: 90px; text-align: right; color: #999; font-size: 12px; flex-shrink: 0; }
+		.item .time { width: 130px; text-align: right; color: #999; font-size: 12px; flex-shrink: 0; }
+
+		.empty { padding: 40px 20px; text-align: center; color: #999; font-size: 14px; }
+
+		/* ---------- 移动端适配 ---------- */
+		@media (max-width: 640px) {
+			.container { padding: 8px; }
+			.toolbar { padding: 8px; gap: 6px; }
+			.search-box { order: 3; flex: 1 1 100%; }
+			.list-head .col-size, .item .size { width: 60px; }
+			.breadcrumb { font-size: 13px; }
+			li.item { padding: 12px 10px; gap: 8px; }
+			.item .icon { font-size: 20px; }
+			.item .name { font-size: 15px; }
+			/* 移动端：大小排序按钮在右上角保留 */
+			.list-head .col-size { margin-left: auto; }
+			/* 移动端：修改时间换行显示在名称下方 */
+			.item .time {
+				flex: 1 1 100%;
+				order: 3;
+				width: auto;
+				text-align: left;
+				color: #aaa;
+				font-size: 12px;
 			}
-			.fab:hover { background-color: #0056b3; transform: scale(1.05); }
-			.fab:active { transform: scale(0.95); }
-			
-			/* Modal styles */
-			.modal {
-				display: none;
-				position: fixed;
-				z-index: 2000;
-				left: 0;
-				top: 0;
-				width: 100%;
-				height: 100%;
-				overflow: auto;
-				background-color: rgba(0,0,0,0.4);
-			}
-			.modal-content {
-				background-color: rgba(255, 255, 255, 0.95);
-				position: absolute;
-				right: 30px;
-				top: 30px;
-				padding: 20px;
-				border: 1px solid rgba(136, 136, 136, 0.5);
-				width: 300px;
-				border-radius: 8px;
-				box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-				backdrop-filter: blur(5px);
-			}
-			.modal-content h3 {
-				margin-top: 0;
-				color: #333;
-			}
-			.modal-content input {
-				width: 100%;
-				padding: 10px;
-				margin: 10px 0 20px 0;
-				border: 1px solid #ddd;
-				border-radius: 4px;
-				box-sizing: border-box;
-			}
-			.modal-buttons {
-				display: flex;
-				gap: 10px;
-				justify-content: flex-end;
-			}
-			.modal-buttons button {
-				padding: 8px 16px;
-				border: none;
-				border-radius: 4px;
-				cursor: pointer;
-				font-size: 14px;
-			}
-			.modal-buttons .btn-create {
-				background-color: #28a745;
-				color: white;
-			}
-			.modal-buttons .btn-create:hover {
-				background-color: #218838;
-			}
-			.modal-buttons .btn-cancel {
-				background-color: #6c757d;
-				color: white;
-			}
-			.modal-buttons .btn-cancel:hover {
-				background-color: #5a6268;
-			}
-		</style>
+			.item.is-dir .time { order: 3; }
+		}
+	</style>
 </head>
 <body>
-	<h1>Index of %s</h1>
-	<ul>`, requestPath, requestPath)
+	<div class="container">
+		<div class="card">
+			<div class="toolbar">
+				<div class="breadcrumb">
+					__PARENT_LINK__
+					<span class="loc" id="location" title="__LOCATION_TITLE__"></span>
+				</div>
+				<div class="search-box">
+					<input type="search" id="searchInput" placeholder="搜索当前目录..." autocomplete="off">
+					<button class="clear-x" id="clearSearch" title="清空搜索">&times;</button>
+				</div>
+				<div class="btn-group" style="display:flex;gap:6px;flex-wrap:wrap;">
+					<button class="tool-btn" id="btnUpload" onclick="document.getElementById('file-upload').click()">📤 上传</button>
+					<button class="tool-btn" onclick="createFolder()">📁 新建文件夹</button>
+					<button class="tool-btn" onclick="createFile()">📄 新建文件</button>
+				</div>
+			</div>
 
-	// Parent directory link
-	if requestPath != "/" {
-		fmt.Fprintf(w, `<li><span class="icon">📁</span><a href="../">..</a></li>`)
-	}
+			<div class="list-head">
+				<span class="col-name"><button id="sortNameBtn" onclick="toggleSort('name')">名称<span class="arrow"></span></button></span>
+				<span class="col-time"><button id="sortTimeBtn" onclick="toggleSort('time')">修改时间<span class="arrow"></span></button></span>
+				<span class="col-size"><button id="sortSizeBtn" onclick="toggleSort('size')">大小<span class="arrow"></span></button></span>
+			</div>
 
-	for _, entry := range entries {
-		name := entry.Name()
-		isDir := entry.IsDir()
-		icon := "📄"
-		if isDir {
-			icon = "📁"
-		}
-
-		// Encode URL
-		urlPath := url.PathEscape(name)
-		if isDir {
-			urlPath += "/"
-		}
-
-		// Get size
-		sizeStr := "-"
-		if !isDir {
-			info, err := entry.Info()
-			if err == nil {
-				sizeStr = formatSize(info.Size())
-			}
-		}
-
-		displayName := name
-		if isDir {
-			displayName += "/"
-		}
-
-		fmt.Fprintf(w, `<li><span class="icon">%s</span><a href="%s">%s</a><span class="size">%s</span></li>`,
-			icon, urlPath, displayName, sizeStr)
-	}
-
-	fmt.Fprintf(w, `</ul>
-
-	<button class="fab" onclick="toggleActions()" title="Actions">+</button>
-	<input type="file" id="file-upload" style="display: none" multiple onchange="uploadFiles(this.files)">
-
-	<!-- Action Menu -->
-	<div id="action-menu" style="display: none; position: fixed; bottom: 100px; right: 30px; background: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 999; padding: 10px; min-width: 150px;">
-		<button onclick="event.stopPropagation(); document.getElementById('file-upload').click(); document.getElementById('action-menu').style.display = 'none';" style="width: 100%; padding: 10px; text-align: left; border: none; background: none; cursor: pointer; border-radius: 4px; margin: 2px 0;">
-			📤 上传文件
-		</button>
-		<button onclick="event.stopPropagation(); createFolder(); document.getElementById('action-menu').style.display = 'none';" style="width: 100%; padding: 10px; text-align: left; border: none; background: none; cursor: pointer; border-radius: 4px; margin: 2px 0;">
-			📁 创建文件夹
-		</button>
-		<button onclick="event.stopPropagation(); createFile(); document.getElementById('action-menu').style.display = 'none';" style="width: 100%; padding: 10px; text-align: left; border: none; background: none; cursor: pointer; border-radius: 4px; margin: 2px 0;">
-			📄 创建文件
-		</button>
+			<ul class="file-list" id="fileList"></ul>
+			<div class="empty" id="emptyBox" style="display:none;">📂 暂无文件</div>
+		</div>
 	</div>
 
-	<script>
-		// Toggle action menu
-		function toggleActions() {
-			const menu = document.getElementById('action-menu');
-			menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
-		}
+	<input type="file" id="file-upload" style="display:none" multiple onchange="uploadFiles(this.files)">
 
-		// Close menu when clicking outside
-		document.addEventListener('click', function(event) {
-			const menu = document.getElementById('action-menu');
-			const fab = document.querySelector('.fab');
-			if (!menu.contains(event.target) && !fab.contains(event.target)) {
-				menu.style.display = 'none';
+	<script>
+	// 目录信息由服务端注入
+	var DIR_LOCATION = __DIR_LOCATION__;
+	var DIR_ITEMS = __DIR_ITEMS__;
+
+	// 排序状态: sortBy = name / size / time, sortAsc = true/false（跨页面刷新记忆）
+	var sortBy = 'name';
+	var sortAsc = true;
+	(function() {
+		try {
+			var saved = localStorage.getItem('dirSort');
+			if (saved) {
+				var s = JSON.parse(saved);
+				if (s && (s.sortBy === 'name' || s.sortBy === 'size' || s.sortBy === 'time')) {
+					sortBy = s.sortBy;
+					sortAsc = !!s.sortAsc;
+				}
 			}
+		} catch (e) {}
+	})();
+
+	function escapeHtml(text) {
+		var div = document.createElement('div');
+		div.textContent = text;
+		return div.innerHTML;
+	}
+
+	function formatSize(bytes) {
+		if (bytes < 1024) return bytes + ' B';
+		var units = ['KB', 'MB', 'GB', 'TB'];
+		var i = -1;
+		do { bytes /= 1024; i++; } while (bytes >= 1024 && i < units.length - 1);
+		return bytes.toFixed(1) + ' ' + units[i];
+	}
+
+	function formatTime(unixSec) {
+		if (!unixSec) return '-';
+		var d = new Date(unixSec * 1000);
+		function pad(n) { return n < 10 ? '0' + n : n; }
+		return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+			pad(d.getHours()) + ':' + pad(d.getMinutes());
+	}
+
+	function fileIcon(name, isDir) {
+		if (isDir) return '📁';
+		var ext = (name.split('.').pop() || '').toLowerCase();
+		if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico'].indexOf(ext) !== -1) return '🖼️';
+		if (['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm'].indexOf(ext) !== -1) return '🎬';
+		if (['mp3', 'wav', 'flac', 'aac', 'ogg'].indexOf(ext) !== -1) return '🎵';
+		if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].indexOf(ext) !== -1) return '🗜️';
+		if (['txt', 'md', 'log'].indexOf(ext) !== -1) return '📄';
+		if (['doc', 'docx', 'pdf', 'xls', 'xlsx', 'ppt', 'pptx'].indexOf(ext) !== -1) return '📑';
+		if (['js', 'css', 'html', 'go', 'py', 'java', 'c', 'cpp', 'json', 'xml', 'yml', 'yaml', 'sh', 'bat'].indexOf(ext) !== -1) return '📝';
+		if (['exe', 'msi', 'apk', 'app', 'dmg', 'deb', 'rpm'].indexOf(ext) !== -1) return '⚙️';
+		return '📄';
+	}
+
+	function naturalCompare(a, b) {
+		// 数字段自然比较（如 file2 < file10），其余忽略大小写字典序
+		var re = /(\d+)|(\D+)/g;
+		var pa = a.match(re) || [];
+		var pb = b.match(re) || [];
+		var n = Math.min(pa.length, pb.length);
+		for (var i = 0; i < n; i++) {
+			var da = /^\d+$/.test(pa[i]);
+			var db = /^\d+$/.test(pb[i]);
+			if (da && db) {
+				var na = parseInt(pa[i], 10), nb = parseInt(pb[i], 10);
+				if (na !== nb) return na - nb;
+			} else if (da !== db) {
+				return da ? -1 : 1; // 数字段小（排在字母前，同 Windows）
+			} else {
+				var la = pa[i].toLowerCase(), lb = pb[i].toLowerCase();
+				if (la !== lb) return la < lb ? -1 : 1;
+			}
+		}
+		return pa.length - pb.length;
+	}
+
+	// 渲染列表
+	function renderList() {
+		var kw = document.getElementById('searchInput').value.trim().toLowerCase();
+		var list = document.getElementById('fileList');
+		var empty = document.getElementById('emptyBox');
+		list.innerHTML = '';
+
+		var filtered = DIR_ITEMS.filter(function(item) {
+			return !kw || item.name.toLowerCase().indexOf(kw) !== -1;
 		});
 
-		// Folder creation function
-		function createFolder() {
-			const folderName = prompt('请输入文件夹名称:');
-			if (!folderName || folderName.trim() === '') {
-				return; // 用户取消或输入为空
+		// 排序
+		filtered.sort(function(x, y) {
+			// 与 Windows 一致：文件夹永远在上
+			if (x.isDir !== y.isDir) return x.isDir ? -1 : 1;
+			var cmp = 0;
+			if (sortBy === 'name') {
+				cmp = naturalCompare(x.name, y.name);
+			} else if (sortBy === 'size') {
+				cmp = x.size - y.size;
+			} else if (sortBy === 'time') {
+				cmp = x.modTime - y.modTime;
 			}
+			return sortAsc ? cmp : -cmp;
+		});
 
-			const trimmedName = folderName.trim();
-
-			// Validate folder name
-			if (trimmedName.includes('/') || trimmedName.includes('\\') || trimmedName.includes('..')) {
-				alert('无效的文件夹名称');
-				return;
-			}
-
-			// Send request to create folder
-			fetch(window.location.href, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
-				body: JSON.stringify({ action: 'createFolder', name: trimmedName })
-			}).then(response => {
-				if (response.ok) {
-					location.reload();
-				} else {
-					return response.text().then(text => {
-						alert('创建文件夹失败: ' + text);
-					});
-				}
-			}).catch(err => {
-				alert('错误: ' + err);
-			});
+		if (!filtered.length) {
+			empty.style.display = 'block';
+			empty.textContent = kw ? '没有匹配「' + document.getElementById('searchInput').value.trim() + '」的结果' : '📂 暂无文件';
+			return;
 		}
+		empty.style.display = 'none';
 
-		// File creation function
-		function createFile() {
-			const fileName = prompt('请输入文件名称:');
-			if (!fileName || fileName.trim() === '') {
-				return; // 用户取消或输入为空
-			}
-
-			const trimmedName = fileName.trim();
-
-			// Validate file name
-			if (trimmedName.includes('/') || trimmedName.includes('\\') || trimmedName.includes('..')) {
-				alert('无效的文件名称');
-				return;
-			}
-
-			// Send request to create file
-			fetch(window.location.href, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
-				body: JSON.stringify({ action: 'createFile', name: trimmedName })
-			}).then(response => {
-				if (response.ok) {
-					location.reload();
-				} else {
-					return response.text().then(text => {
-						alert('创建文件失败: ' + text);
-					});
-				}
-			}).catch(err => {
-				alert('错误: ' + err);
-			});
+		var html = '';
+		for (var i = 0; i < filtered.length; i++) {
+			var item = filtered[i];
+			var displayName = item.name + (item.isDir ? '/' : '');
+			html += '<li class="item' + (item.isDir ? ' is-dir' : '') + '">' +
+				'<span class="icon">' + fileIcon(item.name, item.isDir) + '</span>' +
+				'<a class="name" href="' + item.url + '" title="' + escapeHtml(item.name) + '">' + escapeHtml(displayName) + '</a>' +
+				'<span class="time">' + formatTime(item.modTime) + '</span>' +
+				'<span class="size">' + (item.isDir ? '-' : formatSize(item.size)) + '</span>' +
+				'</li>';
 		}
+		list.innerHTML = html;
+	}
 
-		// Upload files function
-		function uploadFiles(files) {
-			if (!files.length) return;
-
-			const formData = new FormData();
-			for (let i = 0; i < files.length; i++) {
-				formData.append('files', files[i]);
-			}
-
-			const btn = document.querySelector('.fab');
-			const originalText = btn.innerText;
-			btn.innerText = '...';
-			btn.disabled = true;
-
-			fetch(window.location.href, {
-				method: 'POST',
-				body: formData
-			}).then(response => {
-				if (response.ok) {
-					location.reload();
-				} else {
-					alert('Upload failed: ' + response.statusText);
-				}
-			}).catch(err => {
-				alert('Error: ' + err);
-			}).finally(() => {
-				btn.innerText = originalText;
-				btn.disabled = false;
-				document.getElementById('file-upload').value = '';
-			});
+	// 切换排序
+	function toggleSort(field) {
+		if (sortBy === field) {
+			sortAsc = !sortAsc;
+		} else {
+			sortBy = field;
+			sortAsc = true;
 		}
+		try { localStorage.setItem('dirSort', JSON.stringify({ sortBy: sortBy, sortAsc: sortAsc })); } catch (e) {}
+		updateSortButtons();
+		renderList();
+	}
+
+	function updateSortButtons() {
+		var defs = { name: 'sortNameBtn', size: 'sortSizeBtn', time: 'sortTimeBtn' };
+		var titles = { name: '名称', size: '大小', time: '修改时间' };
+		for (var key in defs) {
+			var btn = document.getElementById(defs[key]);
+			var arrow = btn.querySelector('.arrow');
+			if (key === sortBy) {
+				btn.classList.add('active');
+				arrow.textContent = sortAsc ? '▲' : '▼';
+				btn.textContent = titles[key];
+				btn.appendChild(arrow);
+			} else {
+				btn.classList.remove('active');
+				arrow.textContent = '';
+			}
+		}
+	}
+
+	// 搜索
+	var searchTimer = null;
+	document.getElementById('searchInput').addEventListener('input', function() {
+		clearTimeout(searchTimer);
+		searchTimer = setTimeout(renderList, 150);
+	});
+	document.getElementById('clearSearch').addEventListener('click', function() {
+		document.getElementById('searchInput').value = '';
+		renderList();
+		document.getElementById('searchInput').focus();
+	});
+
+	// 新建文件夹
+	function createFolder() {
+		var folderName = prompt('请输入文件夹名称:');
+		if (!folderName || folderName.trim() === '') return;
+		var trimmedName = folderName.trim();
+		if (trimmedName.includes('/') || trimmedName.includes('\\') || trimmedName.includes('..')) {
+			alert('无效的文件夹名称');
+			return;
+		}
+		fetch(window.location.href, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ action: 'createFolder', name: trimmedName })
+		}).then(function(response) {
+			if (response.ok) { location.reload(); }
+			else { return response.text().then(function(text) { alert('创建文件夹失败: ' + text); }); }
+		}).catch(function(err) { alert('错误: ' + err); });
+	}
+
+	// 新建文件
+	function createFile() {
+		var fileName = prompt('请输入文件名称:');
+		if (!fileName || fileName.trim() === '') return;
+		var trimmedName = fileName.trim();
+		if (trimmedName.includes('/') || trimmedName.includes('\\') || trimmedName.includes('..')) {
+			alert('无效的文件名称');
+			return;
+		}
+		fetch(window.location.href, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ action: 'createFile', name: trimmedName })
+		}).then(function(response) {
+			if (response.ok) { location.reload(); }
+			else { return response.text().then(function(text) { alert('创建文件失败: ' + text); }); }
+		}).catch(function(err) { alert('错误: ' + err); });
+	}
+
+	// 上传文件
+	function uploadFiles(files) {
+		if (!files.length) return;
+		var btn = document.getElementById('btnUpload');
+		btn.disabled = true;
+		btn.textContent = '⏳ 上传中...';
+		var formData = new FormData();
+		for (var i = 0; i < files.length; i++) {
+			formData.append('files', files[i]);
+		}
+		fetch(window.location.href, {
+			method: 'POST',
+			body: formData
+		}).then(function(response) {
+			if (response.ok) { location.reload(); }
+			else { alert('上传失败: ' + response.statusText); }
+		}).catch(function(err) {
+			alert('错误: ' + err);
+		}).finally(function() {
+			btn.disabled = false;
+			btn.textContent = '📤 上传';
+			document.getElementById('file-upload').value = '';
+		});
+	}
+
+	// 初始化
+	document.getElementById('location').textContent = DIR_LOCATION;
+	updateSortButtons();
+	renderList();
 	</script>
 </body>
-</html>`)
+</html>`
+	// 注入数据（替换占位符，避免 CSS 中 % 与 fmt.Fprintf 冲突）
+	pageHTML = strings.ReplaceAll(pageHTML, "__TITLE__", html.EscapeString(requestPath))
+	pageHTML = strings.ReplaceAll(pageHTML, "__PARENT_LINK__", parentLink)
+	pageHTML = strings.ReplaceAll(pageHTML, "__LOCATION_TITLE__", html.EscapeString(requestPath))
+	pageHTML = strings.ReplaceAll(pageHTML, "__DIR_LOCATION__", strconv.Quote(requestPath))
+	pageHTML = strings.ReplaceAll(pageHTML, "__DIR_ITEMS__", string(itemsJSON))
+
+	fmt.Fprint(w, pageHTML)
 }
 
 func formatSize(bytes int64) string {
